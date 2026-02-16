@@ -1,0 +1,17 @@
+## Interface: 120000, 120001
+## Title: Reflux Enhanced
+## IconTexture: Interface\AddOns\Reflux Enhanced\icon
+## Notes: Profile manager for addons and saved variables
+## Author: Poms
+## Version: 1.0.0-Midnight
+## SavedVariables: RefluxDB
+## OptionalDeps: Ace3
+
+# --- Libraries ---
+Libs\LibStub\LibStub.lua
+Libs\CallbackHandler-1.0\CallbackHandler-1.0.xml
+Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
+# -----------------------------------
+
+Reflux Enhanced.lua
