@@ -1,5 +1,5 @@
 -- Reflux Enhanced - Profile Manager
--- Version: 1.0.9 (Memory Shield & DB Reset Update)
+-- Version: 1.1.0 (Native Ace3 Integration Update)
 
 -- =============================================================
 -- LIBRARIES & VARIABLES
@@ -12,8 +12,6 @@ local LDBIcon = LibStub("LibDBIcon-1.0")
 -- UTILITY FUNCTIONS
 -- =============================================================
 
--- Size-Limited DeepCopy: Automatically aborts if a database exceeds 5,000 keys.
--- This mathematically prevents massive data caches from causing memory leaks.
 local function DeepCopy(t, lookup_table, depth, tracker)
     if type(t) ~= "table" then return t end
     if type(rawget(t, 0)) == "userdata" then return nil end
@@ -22,7 +20,7 @@ local function DeepCopy(t, lookup_table, depth, tracker)
     if lookup_table[t] then return lookup_table[t] end
 
     depth = depth or 0
-    if depth > 20 then return nil end -- Stop infinite recursion early
+    if depth > 20 then return nil end 
 
     tracker = tracker or { count = 0, limitHit = false }
     if tracker.limitHit then return nil end
@@ -33,7 +31,6 @@ local function DeepCopy(t, lookup_table, depth, tracker)
     for k, v in pairs(t) do
         tracker.count = tracker.count + 1
         
-        -- The Memory Shield: Abort if the table is massive (>5,000 keys)
         if tracker.count > 5000 then 
             tracker.limitHit = true
             return nil 
@@ -182,11 +179,7 @@ local function CaptureActiveData(varName, vType, extraArg)
     local charKey = charNameOnly .. " - " .. realmName
     local charKeyNoSpaces = charNameOnly .. " - " .. realmName:gsub(" ", "")
 
-    if vType == TYPE_ACE3 then
-        local db = extraArg
-        if db.profile then return db.profile end
-
-    elseif vType == TYPE_INTERNAL then
+    if vType == TYPE_INTERNAL then
         local profiles = mainDB.profiles or mainDB.Profiles or mainDB.PROFILES
         local keys = mainDB.profileKeys or mainDB.ProfileKeys or mainDB.charKeys
         if type(profiles) == "table" then
@@ -255,13 +248,7 @@ local function CreateAndPopulate(varName, profileName, data, vType, extraArg)
         return dest
     end
 
-    if vType == TYPE_ACE3 then
-        local db = extraArg
-        local profiles = (db.sv and db.sv.profiles) or mainDB.profiles
-        if type(profiles) == "table" then profiles[profileName] = DeepCopy(safeData) end
-        if db.profiles then db.profiles[profileName] = profiles[profileName] end
-
-    elseif vType == TYPE_INTERNAL or vType == TYPE_SPLIT then
+    if vType == TYPE_INTERNAL or vType == TYPE_SPLIT then
         local profiles = mainDB.profiles or mainDB.Profiles or mainDB.PROFILES
         if type(profiles) == "table" then
             if not profiles[profileName] then profiles[profileName] = {} end
@@ -270,8 +257,6 @@ local function CreateAndPopulate(varName, profileName, data, vType, extraArg)
             if not mainDB[profileName] then mainDB[profileName] = {} end
             SafeOverwrite(mainDB[profileName], safeData)
         end
-    elseif vType == TYPE_FLAT then
-        return
     end
 end
 
@@ -281,18 +266,7 @@ local function SwitchPointers(varName, profileName, vType, extraArg)
     local charKey = UnitName("player") .. " - " .. realmName
     local charKeyNoSpace = UnitName("player") .. " - " .. realmName:gsub(" ", "")
 
-    if vType == TYPE_ACE3 then
-        local db = extraArg
-        if db.profileKeys then 
-            db.profileKeys[charKey] = profileName 
-            db.profileKeys[charKeyNoSpace] = profileName 
-        end
-        if db.sv and db.sv.profileKeys then 
-            db.sv.profileKeys[charKey] = profileName 
-            db.sv.profileKeys[charKeyNoSpace] = profileName 
-        end
-
-    elseif vType == TYPE_INTERNAL then
+    if vType == TYPE_INTERNAL then
         local keys = mainDB.profileKeys or mainDB.ProfileKeys or mainDB.charKeys
         if keys and type(keys) == "table" then
             keys[charKey] = profileName
@@ -343,7 +317,6 @@ local function forceDetectVariables()
         return false
     end
 
-    -- Pass 1: Scan TOC metadata for strict variables
     for i = 1, GetNum() do
         local name = GetInfo(i)
         if name and name ~= "Reflux" and name ~= "Reflux Enhanced" then
@@ -358,7 +331,6 @@ local function forceDetectVariables()
         end
     end
 
-    -- Pass 2: Sweep the global environment to catch dynamic databases (Now safe thanks to DeepCopy limit)
     for k, v in pairs(_G) do
         if type(v) == "table" and k ~= "RefluxDB" and not detected[k] and not isBlacklisted(k) and not isUIObject(v) then
             local kLower = k:lower()
@@ -370,20 +342,6 @@ local function forceDetectVariables()
 
     RefluxDB.emulated = {}
     for varName, _ in pairs(detected) do table.insert(RefluxDB.emulated, varName) end
-end
-
-local function RefreshAceProfiles()
-    if InCombatLockdown() or not LibStub then return end
-    local AceDB = LibStub("AceDB-3.0", true)
-    if not AceDB or not AceDB.db_registry then return end
-    for db, _ in pairs(AceDB.db_registry) do
-        if type(db) == "table" and db.callbacks and db.callbacks.Fire then
-            local currentProfile = (db.GetCurrentProfile and db:GetCurrentProfile()) or "Default"
-            local isBlizzardDB = false
-            if db.parent and (db.parent.GetObjectType or issecurevariable(db, "parent")) then isBlizzardDB = true end
-            if not isBlizzardDB then pcall(db.callbacks.Fire, db.callbacks, "OnProfileChanged", db, currentProfile) end
-        end
-    end
 end
 
 local function ValidateAddons(profileName)
@@ -497,7 +455,21 @@ local function saveProfile(profileName)
     
     for _, varName in ipairs(RefluxDB.emulated) do
         local vType, extra = IdentifyAddonStructure(varName)
-        if vType then
+        
+        -- Hooking directly into native Ace3 APIs
+        if vType == "ACE3" then
+            local db = extra
+            if db.GetCurrentProfile and db.SetProfile and db.CopyProfile then
+                local currentProfile = db:GetCurrentProfile()
+                if currentProfile ~= profileName then
+                    -- pcall prevents malformed addons from breaking the loop
+                    pcall(function()
+                        db:SetProfile(profileName)
+                        db:CopyProfile(currentProfile)
+                    end)
+                end
+            end
+        elseif vType then
             local data = CaptureActiveData(varName, vType, extra)
             CreateAndPopulate(varName, profileName, data, vType, extra)
             SwitchPointers(varName, profileName, vType, extra)
@@ -509,7 +481,6 @@ local function saveProfile(profileName)
         local vType, _ = IdentifyAddonStructure(varName)
         if vType == "FLAT" and _G[varName] then 
             local copiedData = DeepCopy(_G[varName])
-            -- If DeepCopy returns nil, it means the database triggered the >5000 key Memory Shield
             if copiedData then
                 currentSnapshots[varName] = copiedData
             end
@@ -562,7 +533,16 @@ local function switchProfile(profileName)
     
     for _, varName in ipairs(RefluxDB.emulated) do
         local vType, extra = IdentifyAddonStructure(varName)
-        if vType then SwitchPointers(varName, profileName, vType, extra) end
+        
+        -- Utilizing native Ace3 SetProfile 
+        if vType == "ACE3" then
+            local db = extra
+            if db.SetProfile then
+                pcall(function() db:SetProfile(profileName) end)
+            end
+        elseif vType then 
+            SwitchPointers(varName, profileName, vType, extra) 
+        end
     end
     
     RefluxDB.activeProfile = profileName
@@ -571,7 +551,6 @@ local function switchProfile(profileName)
     local charKey = UnitName("player") .. " - " .. GetRealmName()
     RefluxDB.characterLinks[charKey] = profileName
     
-    RefreshAceProfiles()
     collectgarbage("collect")
     
     print("|cFF00FF00Reflux Enhanced: Switched to '" .. profileName .. "'. Reloading UI...|r")
