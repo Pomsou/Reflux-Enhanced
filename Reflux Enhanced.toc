@@ -3,7 +3,7 @@
 ## IconTexture: Interface\AddOns\Reflux Enhanced\icon
 ## Notes: Profile manager for addons and saved variables
 ## Author: Poms
-## Version: 1.0.0-Midnight
+## Version: 1.0.7-Midnight
 ## SavedVariables: RefluxDB
 ## OptionalDeps: Ace3
 

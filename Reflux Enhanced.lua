@@ -1,5 +1,5 @@
 -- Reflux Enhanced - Profile Manager
--- Version: 1.0.5 (Flat DB Support Update)
+-- Version: 1.0.9 (Memory Shield & DB Reset Update)
 
 -- =============================================================
 -- LIBRARIES & VARIABLES
@@ -12,40 +12,49 @@ local LDBIcon = LibStub("LibDBIcon-1.0")
 -- UTILITY FUNCTIONS
 -- =============================================================
 
-local function DeepCopy(t, lookup_table)
+-- Size-Limited DeepCopy: Automatically aborts if a database exceeds 5,000 keys.
+-- This mathematically prevents massive data caches from causing memory leaks.
+local function DeepCopy(t, lookup_table, depth, tracker)
     if type(t) ~= "table" then return t end
-    
-    -- SAFETY CHECK: Do not attempt to copy WoW UI objects (frames, fontstrings, textures).
     if type(rawget(t, 0)) == "userdata" then return nil end
 
-    if lookup_table and lookup_table[t] then return lookup_table[t] end
+    lookup_table = lookup_table or {}
+    if lookup_table[t] then return lookup_table[t] end
+
+    depth = depth or 0
+    if depth > 20 then return nil end -- Stop infinite recursion early
+
+    tracker = tracker or { count = 0, limitHit = false }
+    if tracker.limitHit then return nil end
     
     local copy = {}
-    lookup_table = lookup_table or {}
     lookup_table[t] = copy
     
     for k, v in pairs(t) do
-        -- Skip functions and UI objects stored as keys (rare, but possible)
-        local isKeyValid = type(k) ~= "function" and (type(k) ~= "table" or type(rawget(k, 0)) ~= "userdata")
+        tracker.count = tracker.count + 1
         
+        -- The Memory Shield: Abort if the table is massive (>5,000 keys)
+        if tracker.count > 5000 then 
+            tracker.limitHit = true
+            return nil 
+        end
+
+        local isKeyValid = type(k) ~= "function" and (type(k) ~= "table" or type(rawget(k, 0)) ~= "userdata")
         if isKeyValid then
             if type(v) == "table" then
-                local copiedValue = DeepCopy(v, lookup_table)
-                -- Only assign the table if it wasn't a stripped UI object
-                if copiedValue ~= nil then
-                    copy[k] = copiedValue
-                end
+                local copiedValue = DeepCopy(v, lookup_table, depth + 1, tracker)
+                if tracker.limitHit then return nil end
+                if copiedValue ~= nil then copy[k] = copiedValue end
             elseif type(v) ~= "function" then
-                -- Only copy raw data types (strings, numbers, booleans)
                 copy[k] = v
             end
         end
     end
-    
     return copy
 end
 
-local function InjectDataInPlace(dest, src)
+local function InjectDataInPlace(dest, src, isRoot)
+    if isRoot == nil then isRoot = true end
     if type(dest) ~= "table" or type(src) ~= "table" then return end
 
     local protectedKeys = {
@@ -54,53 +63,37 @@ local function InjectDataInPlace(dest, src)
         ["global"] = true, ["namespaces"] = true,
     }
 
-    -- Pass 1: Clean up old keys not present in the new profile
+    local pointerKeys = {
+        ["profileKeys"] = true, ["ProfileKeys"] = true, ["charKeys"] = true,
+    }
+
     for k, v in pairs(dest) do
         if src[k] == nil then
             local shouldDelete = true
-            if type(k) == "string" and protectedKeys[k] then shouldDelete = false end
-            if type(v) == "table" then shouldDelete = false end
-            
-            -- Protect live UI Objects in the destination table
+            if isRoot and type(k) == "string" and protectedKeys[k] then shouldDelete = false end
             if type(v) == "table" and type(rawget(v, 0)) == "userdata" then shouldDelete = false end
-            if type(k) == "string" and issecurevariable(dest, k) then shouldDelete = false end
-            
-            if shouldDelete then 
-                -- pcall prevents crashes if __newindex throws an error on deletion
-                pcall(function() dest[k] = nil end)
-            end
+            if isRoot and type(k) == "string" and issecurevariable(dest, k) then shouldDelete = false end
+            if shouldDelete then rawset(dest, k, nil) end
         end
     end
 
-    -- Pass 2: Inject new profile data
     for k, v in pairs(src) do
-        local isSecure = (type(k) == "string") and issecurevariable(dest, k) or false
+        local isSecure = isRoot and (type(k) == "string") and issecurevariable(dest, k) or false
+        local isPointer = isRoot and type(k) == "string" and pointerKeys[k]
         
-        -- Safely check existing destination value without triggering strict __index errors
-        local success, destVal = pcall(function() return dest[k] end)
-        if not success then destVal = rawget(dest, k) end
-        
-        local isDestUIObject = type(destVal) == "table" and type(rawget(destVal, 0)) == "userdata"
+        if not isSecure and not isPointer then
+            local destVal = rawget(dest, k)
+            local isDestUIObject = type(destVal) == "table" and type(rawget(destVal, 0)) == "userdata"
 
-        if not isSecure and not isDestUIObject then
-            if type(v) == "table" then
-                if type(destVal) ~= "table" then 
-                    -- Safely initialize the table
-                    pcall(function() dest[k] = {} end)
-                end
-                
-                -- Fetch the table and recursively inject
-                local nextDest = rawget(dest, k) or dest[k]
-                if type(nextDest) == "table" then
-                    InjectDataInPlace(nextDest, v)
-                end
-            elseif type(v) ~= "function" then
-                -- Safely overwrite the value
-                local setSuccess = pcall(function() dest[k] = v end)
-                
-                -- Fallback to rawset to bypass the addon if it locked its table with __newindex
-                if not setSuccess then
-                    pcall(rawset, dest, k, v)
+            if not isDestUIObject then
+                if type(v) == "table" then
+                    if type(destVal) ~= "table" then 
+                        rawset(dest, k, {})
+                        destVal = rawget(dest, k)
+                    end
+                    InjectDataInPlace(destVal, v, false)
+                elseif type(v) ~= "function" then
+                    rawset(dest, k, v)
                 end
             end
         end
@@ -115,29 +108,20 @@ local function GetAceDBForVariable(varName)
     local globalTable = _G[varName]
     if not globalTable then return nil end
 
-    -- 1. Standard Registry Check
     for db, _ in pairs(AceDB.db_registry) do
-        if db == globalTable or db.sv == globalTable or db.parent == globalTable then
-            return db
-        end
+        if db == globalTable or db.sv == globalTable or db.parent == globalTable then return db end
     end
 
-    -- 2. AceAddon Fallback (Critical for LiteMount)
     local potentialAddonName = varName:gsub("DB$", ""):gsub("_", ""):gsub("Config", "")
     local AceAddon = LibStub("AceAddon-3.0", true)
     if AceAddon then
         local app = AceAddon:GetAddon(potentialAddonName, true)
-        if app and app.db and (app.db.sv == globalTable or app.db.sv == varName) then
-            return app.db
-        end
+        if app and app.db and (app.db.sv == globalTable or app.db.sv == varName) then return app.db end
     end
 
-    -- 3. Global Object Scan (Last resort)
     if _G[potentialAddonName] and type(_G[potentialAddonName]) == "table" then
         local app = _G[potentialAddonName]
-        if app.db and type(app.db) == "table" and (app.db.sv == globalTable) then
-            return app.db
-        end
+        if app.db and type(app.db) == "table" and (app.db.sv == globalTable) then return app.db end
     end
 
     return nil
@@ -155,7 +139,6 @@ local function IdentifyAddonStructure(varName)
     local db = GetAceDBForVariable(varName)
     if db then return TYPE_ACE3, db end
 
-    -- Expanded suffix list to include Memento and other common formats without underscores
     local suffixes = {
         "_CONFIG", "_DATA", "_DB", "_SETTINGS", "_VARS", "_OPTIONS", "_CHAR",
         "CONFIG", "DATA", "DB", "SETTINGS", "VARS", "OPTIONS"
@@ -179,29 +162,16 @@ local function IdentifyAddonStructure(varName)
             if _G[ptr] ~= nil then return TYPE_SPLIT, ptr end
         end
         
-        -- If it natively has a profiles table, it's internal. Otherwise, it's flat.
-        if mainDB.profiles or mainDB.Profiles or mainDB.PROFILES then
-            return TYPE_INTERNAL, mainDB
-        else
-            return TYPE_FLAT, mainDB
-        end
+        if mainDB.profiles or mainDB.Profiles or mainDB.PROFILES then return TYPE_INTERNAL, mainDB
+        else return TYPE_FLAT, mainDB end
     end
 
-    -- Fuzzy Match: If it has a profiles table but didn't match a suffix, treat as INTERNAL
-    if mainDB.profiles or mainDB.Profiles or mainDB.PROFILES then 
-        return TYPE_INTERNAL, mainDB 
-    end
-    
-    -- Fallback: If it reached here, it's a valid DB but has no profile structure.
-    return TYPE_FLAT, deepmainDB
+    if mainDB.profiles or mainDB.Profiles or mainDB.PROFILES then return TYPE_INTERNAL, mainDB end
+    return TYPE_FLAT, mainDB
 end
 
 local function isUIObject(t)
     if type(t) ~= "table" then return false end
-    
-    -- Safely check for WoW UI frames by looking for the internal C userdata at index 0.
-    -- Using rawget bypasses strict __index metatables (like ConsolePort's) 
-    -- that throw errors when querying non-existent keys like 'GetObjectType'.
     return type(rawget(t, 0)) == "userdata"
 end
 
@@ -257,8 +227,11 @@ local function CaptureActiveData(varName, vType, extraArg)
     local hasData = false
     for k, v in pairs(mainDB) do
         if type(v) ~= "function" and not isUIObject(v) then
-            rootData[k] = DeepCopy(v)
-            hasData = true
+            local copiedValue = DeepCopy(v)
+            if copiedValue then
+                rootData[k] = copiedValue
+                hasData = true
+            end
         end
     end
     
@@ -272,16 +245,12 @@ local function CreateAndPopulate(varName, profileName, data, vType, extraArg)
 
     local function SafeOverwrite(dest, src)
         if type(dest) ~= "table" then return DeepCopy(src) end
-        for k in pairs(dest) do
-            if src[k] == nil then dest[k] = nil end
-        end
+        for k in pairs(dest) do if src[k] == nil then dest[k] = nil end end
         for k, v in pairs(src) do
             if type(v) == "table" then
                 if type(dest[k]) ~= "table" then dest[k] = {} end
                 SafeOverwrite(dest[k], v)
-            else
-                dest[k] = v
-            end
+            else dest[k] = v end
         end
         return dest
     end
@@ -289,9 +258,7 @@ local function CreateAndPopulate(varName, profileName, data, vType, extraArg)
     if vType == TYPE_ACE3 then
         local db = extraArg
         local profiles = (db.sv and db.sv.profiles) or mainDB.profiles
-        if type(profiles) == "table" then 
-            profiles[profileName] = DeepCopy(safeData) 
-        end
+        if type(profiles) == "table" then profiles[profileName] = DeepCopy(safeData) end
         if db.profiles then db.profiles[profileName] = profiles[profileName] end
 
     elseif vType == TYPE_INTERNAL or vType == TYPE_SPLIT then
@@ -335,9 +302,6 @@ local function SwitchPointers(varName, profileName, vType, extraArg)
     elseif vType == TYPE_SPLIT then
         local pointerVarName = extraArg
         if pointerVarName then _G[pointerVarName] = profileName end
-        
-    elseif vType == TYPE_FLAT then
-        return
     end
 end
 
@@ -348,6 +312,7 @@ local function initDB()
     RefluxDB.activeProfile = RefluxDB.activeProfile or nil
     RefluxDB.pendingSyncProfile = RefluxDB.pendingSyncProfile or nil
     RefluxDB.minimap = RefluxDB.minimap or { hide = false }
+    RefluxDB.characterLinks = RefluxDB.characterLinks or {}
 end
 
 local function forceDetectVariables()
@@ -356,6 +321,12 @@ local function forceDetectVariables()
     local GetNum = (C_AddOns and C_AddOns.GetNumAddOns) or GetNumAddOns
     local GetInfo = (C_AddOns and C_AddOns.GetAddOnInfo) or GetAddOnInfo
     local GetMetadata = (C_AddOns and C_AddOns.GetAddOnMetadata) or GetAddOnMetadata
+
+    local addonBlacklist = {
+        "TradeSkillMaster", "Details", "RaiderIO", "AllTheThings", "DataStore", 
+        "Auctionator", "Auctioneer", "Skada", "Recount", "WeakAurasArchive",
+        "Pawn", "Questie", "GatherMate", "Routes", "TomTom", "DBM", "BigWigs", "AtlasLoot"
+    }
 
     local blizzardBlacklist = {
         "Blizzard_", "BLIZZARD_", "Compact", "NamePlate", "UnitFrame", "VideoOptions", "InterfaceOptions",
@@ -368,9 +339,11 @@ local function forceDetectVariables()
         if type(varName) ~= "string" or varName == "" then return true end
         if issecurevariable(_G, varName) then return true end
         for _, pattern in ipairs(blizzardBlacklist) do if varName:find(pattern) then return true end end
+        for _, pattern in ipairs(addonBlacklist) do if varName:find(pattern) then return true end end
         return false
     end
 
+    -- Pass 1: Scan TOC metadata for strict variables
     for i = 1, GetNum() do
         local name = GetInfo(i)
         if name and name ~= "Reflux" and name ~= "Reflux Enhanced" then
@@ -378,15 +351,16 @@ local function forceDetectVariables()
             local svpc = GetMetadata(name, "SavedVariablesPerCharacter") or ""
             for var in string.gmatch(sv .. "," .. svpc, "([^,%s]+)") do
                 local cleanVar = var:gsub("%s+", "")
-                if _G[cleanVar] and not isBlacklisted(cleanVar) and type(_G[cleanVar]) == "table" and not isUIObject(_G[cleanVar]) then
+                if cleanVar ~= "" and _G[cleanVar] and type(_G[cleanVar]) == "table" and not isBlacklisted(cleanVar) and not isUIObject(_G[cleanVar]) then
                     detected[cleanVar] = true
                 end
             end
         end
     end
 
+    -- Pass 2: Sweep the global environment to catch dynamic databases (Now safe thanks to DeepCopy limit)
     for k, v in pairs(_G) do
-        if type(v) == "table" and k ~= "RefluxDB" and not isBlacklisted(k) and not isUIObject(v) then
+        if type(v) == "table" and k ~= "RefluxDB" and not detected[k] and not isBlacklisted(k) and not isUIObject(v) then
             local kLower = k:lower()
             if kLower:find("db$") or kLower:find("data$") or kLower:find("config$") or kLower:find("settings$") or kLower:find("options$") or kLower:find("vars$") then 
                 detected[k] = true 
@@ -395,9 +369,7 @@ local function forceDetectVariables()
     end
 
     RefluxDB.emulated = {}
-    for varName, _ in pairs(detected) do 
-        table.insert(RefluxDB.emulated, varName) 
-    end
+    for varName, _ in pairs(detected) do table.insert(RefluxDB.emulated, varName) end
 end
 
 local function RefreshAceProfiles()
@@ -415,9 +387,7 @@ local function RefreshAceProfiles()
 end
 
 local function ValidateAddons(profileName)
-    if not RefluxDB.profiles[profileName] or not RefluxDB.profiles[profileName].meta or not RefluxDB.profiles[profileName].meta.addons then
-        return {}
-    end
+    if not RefluxDB.profiles[profileName] or not RefluxDB.profiles[profileName].meta or not RefluxDB.profiles[profileName].meta.addons then return {} end
     
     local missing = {}
     local savedAddons = RefluxDB.profiles[profileName].meta.addons
@@ -425,50 +395,34 @@ local function ValidateAddons(profileName)
     local GetInfo = (C_AddOns and C_AddOns.GetAddOnInfo) or GetAddOnInfo
     local GetDependencies = (C_AddOns and C_AddOns.GetAddOnDependencies) or GetAddOnDependencies
     
-    -- Dynamically build a list of everything that SHOULD be enabled, including dependencies
     local expectedEnabled = {}
-    
     local function MarkExpected(name)
         if not expectedEnabled[name] then
             expectedEnabled[name] = true
             if GetDependencies then
-                -- Safely capture all returned dependencies into a table
                 local deps = {GetDependencies(name)}
-                for _, dep in ipairs(deps) do
-                    if dep and dep ~= "" then MarkExpected(dep) end
-                end
+                for _, dep in ipairs(deps) do if dep and dep ~= "" then MarkExpected(dep) end end
             end
         end
     end
     
-    -- Pass 1: Resolve all required addons and their libraries
-    for name, state in pairs(savedAddons) do
-        if state and GetInfo(name) then
-            MarkExpected(name)
-        end
-    end
+    for name, state in pairs(savedAddons) do if state and GetInfo(name) then MarkExpected(name) end end
     
-    -- Pass 2: Compare against current client state
     for i = 1, GetNum() do
         local name, _, _, isEnabled = GetInfo(i)
         if name ~= "Reflux" and name ~= "Reflux Enhanced" then
             local shouldBeEnabled = expectedEnabled[name]
-            if isEnabled and not shouldBeEnabled then
-                table.insert(missing, name .. " (Should be Disabled)")
-            elseif not isEnabled and shouldBeEnabled then
-                table.insert(missing, name .. " (Should be Enabled)")
-            end
+            if isEnabled and not shouldBeEnabled then table.insert(missing, name .. " (Should be Disabled)")
+            elseif not isEnabled and shouldBeEnabled then table.insert(missing, name .. " (Should be Enabled)") end
         end
     end
-    
     return missing
 end
 
 local function SyncAddonsOnly(profileName)
     if not RefluxDB.profiles[profileName] then print("|cFFFF0000Reflux Enhanced: Profile not found.|r") return end
     if not RefluxDB.profiles[profileName].meta or not RefluxDB.profiles[profileName].meta.addons then
-        print("|cFFFFFF00Reflux Enhanced: No addon data for this profile.|r")
-        return
+        print("|cFFFFFF00Reflux Enhanced: No addon data for this profile.|r") return
     end
     
     local savedAddons = RefluxDB.profiles[profileName].meta.addons
@@ -484,7 +438,6 @@ local function SyncAddonsOnly(profileName)
     
     print("|cFF00FF00Reflux Enhanced: Syncing addons for '"..profileName.."'...|r")
     
-    -- Helper function to recursively enable dependencies
     local function EnableWithDeps(addonName)
         local _, _, _, isEnabled = GetInfo(addonName)
         if not isEnabled then
@@ -492,7 +445,6 @@ local function SyncAddonsOnly(profileName)
             print("  |cFF00FF00+ Enabling: " .. addonName .. "|r")
             changesMade = true
         end
-        
         if GetDependencies then
             local deps = {GetDependencies(addonName)}
             for _, depName in ipairs(deps) do
@@ -508,7 +460,6 @@ local function SyncAddonsOnly(profileName)
         end
     end
 
-    -- Pass 1: Disable everything that shouldn't be loaded on this character
     for i = 1, GetNum() do
         local name, _, _, isEnabled = GetInfo(i)
         if name ~= "Reflux" and name ~= "Reflux Enhanced" then
@@ -520,21 +471,15 @@ local function SyncAddonsOnly(profileName)
         end
     end
     
-    -- Pass 2: Enable saved addons and resolve any new dependencies
     for name, shouldBeEnabled in pairs(savedAddons) do
         if shouldBeEnabled and name ~= "Reflux" and name ~= "Reflux Enhanced" then
-            if GetInfo(name) then
-                EnableWithDeps(name)
-            else
-                print("  |cFF888888? Missing Addon Ignored: " .. name .. "|r")
-            end
+            if GetInfo(name) then EnableWithDeps(name)
+            else print("  |cFF888888? Missing Addon Ignored: " .. name .. "|r") end
         end
     end
 
     if changesMade then
-        -- Force WoW to immediately write the new AddOn states to the hard drive
         if SaveState then SaveState() end 
-        
         print("|cFF00FF00Reflux Enhanced: Addons updated. Reloading UI...|r")
         RefluxDB.pendingSyncProfile = profileName
         ReloadUI()
@@ -561,7 +506,14 @@ local function saveProfile(profileName)
 
     local currentSnapshots = {}
     for _, varName in ipairs(RefluxDB.emulated) do
-        if _G[varName] then currentSnapshots[varName] = DeepCopy(_G[varName]) end
+        local vType, _ = IdentifyAddonStructure(varName)
+        if vType == "FLAT" and _G[varName] then 
+            local copiedData = DeepCopy(_G[varName])
+            -- If DeepCopy returns nil, it means the database triggered the >5000 key Memory Shield
+            if copiedData then
+                currentSnapshots[varName] = copiedData
+            end
+        end
     end
     
     RefluxDB.profiles[profileName] = currentSnapshots
@@ -575,26 +527,17 @@ local function saveProfile(profileName)
         if enabled then activeAddons[name] = true end
     end
     
-    RefluxDB.profiles[profileName].meta = {
-        timestamp = time(),
-        addons = activeAddons
-    }
-    
+    RefluxDB.profiles[profileName].meta = { timestamp = time(), addons = activeAddons }
     RefluxDB.activeProfile = profileName
     RefluxDB.forceNextLogin = profileName
     
--- Clean up the memory bloat caused by DeepCopying the entire UI state
     collectgarbage("collect")
-    
     print("|cFF00FF00Reflux Enhanced: Profile '|r|cFFFFFF00" .. profileName .. "|r|cFF00FF00' saved. Reloading to write to disk...|r")
     ReloadUI()
 end
 
 local function switchProfile(profileName)
-    if not profileName or not RefluxDB.profiles[profileName] then 
-        print("|cFFFF0000Reflux Enhanced: Profile not found.|r") 
-        return 
-    end
+    if not profileName or not RefluxDB.profiles[profileName] then print("|cFFFF0000Reflux Enhanced: Profile not found.|r") return end
     
     initDB()
     forceDetectVariables()
@@ -608,13 +551,12 @@ local function switchProfile(profileName)
         return
     end
     
-    -- We are about to do heavy table manipulation. Let the user know.
     print("|cFFFFFF00Reflux Enhanced: Preparing data for '" .. profileName .. "'...|r")
     
     local savedData = RefluxDB.profiles[profileName]
     for varName, content in pairs(savedData) do
         if varName ~= "meta" and _G[varName] and type(_G[varName]) == "table" then
-            InjectDataInPlace(_G[varName], content)
+            InjectDataInPlace(_G[varName], content, true)
         end
     end
     
@@ -625,6 +567,9 @@ local function switchProfile(profileName)
     
     RefluxDB.activeProfile = profileName
     RefluxDB.forceNextLogin = profileName
+    
+    local charKey = UnitName("player") .. " - " .. GetRealmName()
+    RefluxDB.characterLinks[charKey] = profileName
     
     RefreshAceProfiles()
     collectgarbage("collect")
@@ -638,29 +583,15 @@ end
 -- =============================================================
 
 local refluxLDB = LDB:NewDataObject("RefluxEnhanced", {
-    type = "data source",
-    text = "Reflux",
-    icon = "Interface\\AddOns\\Reflux Enhanced\\icon", 
-    
+    type = "data source", text = "Reflux", icon = "Interface\\AddOns\\Reflux Enhanced\\icon", 
     OnTooltipShow = function(tooltip)
         tooltip:AddLine("Reflux Enhanced")
-        if RefluxDB.activeProfile then
-            tooltip:AddLine("Active: |cFF00FF00" .. RefluxDB.activeProfile .. "|r")
-        else
-            tooltip:AddLine("Active: |cFF888888None|r")
-        end
+        tooltip:AddLine("Active: " .. (RefluxDB.activeProfile and "|cFF00FF00" .. RefluxDB.activeProfile .. "|r" or "|cFF888888None|r"))
         tooltip:AddLine(" ")
         tooltip:AddLine("|cFFeda55fLeft-Click|r to list profiles")
         tooltip:AddLine("|cFFeda55fRight-Click|r for help")
     end,
-    
-    OnClick = function(self, button)
-        if button == "RightButton" then
-            refluxCommandHandler("help") 
-        else
-            refluxCommandHandler("list") 
-        end
-    end,
+    OnClick = function(self, button) if button == "RightButton" then refluxCommandHandler("help") else refluxCommandHandler("list") end end,
 })
 
 -- =============================================================
@@ -670,82 +601,117 @@ local refluxLDB = LDB:NewDataObject("RefluxEnhanced", {
 function refluxCommandHandler(msg)
     local cmd, arg = string.match(msg or "", "^%s*([^%s]+)%s*(.*)$")
     cmd = cmd and string.lower(cmd) or ""
-    
-    -- Sanitize input
     arg = arg and arg:match("^%s*(.-)%s*$") or ""
 
     if cmd == "save" then
-        if arg == "" then
-            print("|cFFFF0000Reflux Enhanced: Please specify a profile name. Usage: /reflux save [name]|r")
-        else
-            saveProfile(arg)
-        end
-        
+        if arg == "" then print("|cFFFF0000Reflux Enhanced: Please specify a profile name. Usage: /reflux save [name]|r") else saveProfile(arg) end
     elseif cmd == "switch" then
-        if arg == "" then
-            print("|cFFFF0000Reflux Enhanced: Please specify a profile name. Usage: /reflux switch [name]|r")
-        else
-            switchProfile(arg)
-        end
-        
+        if arg == "" then print("|cFFFF0000Reflux Enhanced: Please specify a profile name. Usage: /reflux switch [name]|r") else switchProfile(arg) end
     elseif cmd == "addons" then
         if arg == "" then
-            if RefluxDB.activeProfile then 
-                arg = RefluxDB.activeProfile
-            else 
-                print("|cFFFF0000Reflux Enhanced: No active profile to sync. Usage: /reflux addons [name]|r")
-                return 
-            end
+            if RefluxDB.activeProfile then arg = RefluxDB.activeProfile else print("|cFFFF0000Reflux Enhanced: No active profile to sync. Usage: /reflux addons [name]|r") return end
         end
         SyncAddonsOnly(arg)
-        
     elseif cmd == "delete" then
         if arg == "" then
             print("|cFFFF0000Reflux Enhanced: Please specify a profile name. Usage: /reflux delete [name]|r")
         elseif RefluxDB.profiles[arg] then
             RefluxDB.profiles[arg] = nil
             if RefluxDB.activeProfile == arg then RefluxDB.activeProfile = nil end
-            print("|cFF00FF00Reflux Enhanced: Deleted profile '" .. arg .. "'.|r")
+            if RefluxDB.characterLinks then
+                for charKey, linkedProfile in pairs(RefluxDB.characterLinks) do
+                    if linkedProfile == arg then RefluxDB.characterLinks[charKey] = nil end
+                end
+            end
+            if RefluxDB.forceNextLogin == arg then RefluxDB.forceNextLogin = nil end
+            if RefluxDB.pendingSyncProfile == arg then RefluxDB.pendingSyncProfile = nil end
+            print("|cFF00FF00Reflux Enhanced: Deleted profile '" .. arg .. "'. Database cleaned.|r")
         else
             print("|cFFFF0000Reflux Enhanced: Profile '" .. arg .. "' does not exist.|r")
         end
-        
+    elseif cmd == "reset" then
+        RefluxDB = {}
+        initDB()
+        print("|cFF00FF00Reflux Enhanced: Database completely wiped. Memory freed.|r")
+        ReloadUI()
     elseif cmd == "list" then
         print("|cFF00FFFF--- Reflux Enhanced Profiles ---|r")
         local count = 0
         for name, _ in pairs(RefluxDB.profiles) do
-            local suffix = (name == RefluxDB.activeProfile) and " |cFF00FF00(Active)|r" or ""
-            print("  - |cFFFFFF00" .. name .. "|r" .. suffix)
+            print("  - |cFFFFFF00" .. name .. "|r" .. ((name == RefluxDB.activeProfile) and " |cFF00FF00(Active)|r" or ""))
             count = count + 1
         end
-        if count == 0 then
-            print("  |cFF888888No profiles saved yet.|r")
-        end
-        
+        if count == 0 then print("  |cFF888888No profiles saved yet.|r") end
     elseif cmd == "icon" then
         RefluxDB.minimap.hide = not RefluxDB.minimap.hide
         if RefluxDB.minimap.hide then
-            LDBIcon:Hide("RefluxEnhanced")
-            print("|cFFFFFF00Reflux Enhanced: Minimap icon hidden.|r")
+            LDBIcon:Hide("RefluxEnhanced") print("|cFFFFFF00Reflux Enhanced: Minimap icon hidden.|r")
         else
-            LDBIcon:Show("RefluxEnhanced")
-            print("|cFF00FF00Reflux Enhanced: Minimap icon shown.|r")
+            LDBIcon:Show("RefluxEnhanced") print("|cFF00FF00Reflux Enhanced: Minimap icon shown.|r")
         end
-        
+    elseif cmd == "debug" then
+        initDB()
+        forceDetectVariables()
+        print("|cFF00FFFF--- Reflux Enhanced: Tracked Databases ---|r")
+        local count = 0
+        local sortedDBs = {}
+        for _, v in ipairs(RefluxDB.emulated) do table.insert(sortedDBs, v) end
+        table.sort(sortedDBs)
+        for _, varName in ipairs(sortedDBs) do
+            local vType, _ = IdentifyAddonStructure(varName)
+            local typeColor = "|cFFaaaaaa"
+            if vType == "ACE3" then typeColor = "|cFFFFaa00"
+            elseif vType == "INTERNAL" then typeColor = "|cFF00FF00"
+            elseif vType == "SPLIT" then typeColor = "|cFF00aaff"
+            elseif vType == "FLAT" then typeColor = "|cFFFF00FF" end
+            if vType then print("  " .. typeColor .. "[" .. vType .. "]|r |cFFFFFF00" .. varName .. "|r") else print("  |cFFFF0000[UNKNOWN]|r |cFFFFFF00" .. varName .. "|r") end
+            count = count + 1
+        end
+        print("  |cFF888888Total Databases Tracked: " .. count .. "|r")
     else
-        -- help menu for invalid commands or /reflux alone
         print("|cFF00FFFF--- Reflux Enhanced Commands ---|r")
         print("  |cFFFFFF00/reflux save [name]|r - Saves the current UI state")
         print("  |cFFFFFF00/reflux switch [name]|r - Switches to a saved profile")
         print("  |cFFFFFF00/reflux addons [name]|r - Syncs addons for a profile")
         print("  |cFFFFFF00/reflux delete [name]|r - Deletes a saved profile")
+        print("  |cFFFFFF00/reflux reset|r - Wipes Reflux memory completely")
         print("  |cFFFFFF00/reflux list|r - Lists all saved profiles")
+        print("  |cFFFFFF00/reflux debug|r - Shows all detected addon databases")
         print("  |cFFFFFF00/reflux icon|r - Toggles the minimap button")
     end
 end
 
 SlashCmdList["REFLUX"] = refluxCommandHandler
 SLASH_REFLUX1 = "/reflux"
+
+local function SilentAutoRestore(profileName)
+    if not profileName or not RefluxDB.profiles[profileName] then return end
+    local savedData = RefluxDB.profiles[profileName]
+    
+    local dbsToRestore = {}
+    for _, varName in ipairs(RefluxDB.emulated) do
+        local vType, _ = IdentifyAddonStructure(varName)
+        if vType == "FLAT" and savedData[varName] and _G[varName] and type(_G[varName]) == "table" then
+            table.insert(dbsToRestore, varName)
+        end
+    end
+    
+    if #dbsToRestore == 0 then return end
+
+    local index = 1
+    local ticker
+    ticker = C_Timer.NewTicker(0.05, function()
+        local varName = dbsToRestore[index]
+        if varName and _G[varName] then
+            InjectDataInPlace(_G[varName], savedData[varName], true)
+        end
+        
+        index = index + 1
+        if index > #dbsToRestore then
+            ticker:Cancel()
+        end
+    end)
+end
 
 local f = CreateFrame("Frame")
 f:RegisterEvent("PLAYER_LOGIN")
@@ -756,17 +722,16 @@ f:SetScript("OnEvent", function()
         LDBIcon:Register("RefluxEnhanced", refluxLDB, RefluxDB.minimap)
     end
     
+    local charKey = UnitName("player") .. " - " .. GetRealmName()
+    local assignedProfile = RefluxDB.characterLinks[charKey]
+    
     if RefluxDB.forceNextLogin then
         local pName = RefluxDB.forceNextLogin
         RefluxDB.forceNextLogin = nil
         C_Timer.After(1, function() print("|cFF00FF00Reflux Enhanced: '" .. pName .. "' active.|r") end)
-    end
-    if RefluxDB.pendingSyncProfile then
-        local pName = RefluxDB.pendingSyncProfile
-        RefluxDB.pendingSyncProfile = nil
-        C_Timer.After(2, function()
-            print("|cFF00FF00Reflux Enhanced: Addons loaded.|r")
-            print("|cFFFFFF00You can now use |r|cFF00FF00/reflux switch " .. pName .. "|r|cFFFFFF00 to finish loading the profile.|r")
+    elseif assignedProfile then
+        C_Timer.After(1.5, function()
+            SilentAutoRestore(assignedProfile)
         end)
     end
 end)
