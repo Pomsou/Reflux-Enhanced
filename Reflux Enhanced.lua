@@ -1,5 +1,5 @@
 -- Reflux Enhanced - Profile Manager
--- Version: 1.1.0 (Native Ace3 Integration Update)
+-- Version: 1.0.9 (Custom DB Manager Support, fixed Reflux Addons command)
 
 -- =============================================================
 -- LIBRARIES & VARIABLES
@@ -100,25 +100,46 @@ end
 local function GetAceDBForVariable(varName)
     if not LibStub then return nil end
     local AceDB = LibStub("AceDB-3.0", true)
-    if not AceDB or not AceDB.db_registry then return nil end
-    
     local globalTable = _G[varName]
-    if not globalTable then return nil end
-
-    for db, _ in pairs(AceDB.db_registry) do
-        if db == globalTable or db.sv == globalTable or db.parent == globalTable then return db end
+    
+    -- 1. Official AceDB Registry Check
+    if AceDB and AceDB.db_registry and globalTable then
+        for db, _ in pairs(AceDB.db_registry) do
+            if db == globalTable or db.sv == globalTable or db.parent == globalTable then return db end
+        end
     end
 
+    -- 2. AceAddon Object Check
     local potentialAddonName = varName:gsub("DB$", ""):gsub("_", ""):gsub("Config", "")
     local AceAddon = LibStub("AceAddon-3.0", true)
-    if AceAddon then
+    if AceAddon and globalTable then
         local app = AceAddon:GetAddon(potentialAddonName, true)
         if app and app.db and (app.db.sv == globalTable or app.db.sv == varName) then return app.db end
     end
 
+    -- 3. Standard Global Object Check
     if _G[potentialAddonName] and type(_G[potentialAddonName]) == "table" then
         local app = _G[potentialAddonName]
         if app.db and type(app.db) == "table" and (app.db.sv == globalTable) then return app.db end
+    end
+
+    -- 4. Aggressive Heuristic Scan (Finds Frogski's custom DB manager)
+    local cleanVar = varName:lower():gsub("db$", ""):gsub("account$", ""):gsub("data$", ""):gsub("config$", "")
+    for k, v in pairs(_G) do
+        if type(v) == "table" and k ~= "RefluxDB" and k ~= "AceDB-3.0" then
+            local success, db = pcall(function() return rawget(v, "db") end)
+            if success and type(db) == "table" and type(rawget(db, "SetProfile")) == "function" and type(rawget(db, "GetCurrentProfile")) == "function" then
+                -- Does it implicitly own this variable?
+                if globalTable and (db.sv == globalTable or db.parent == globalTable) then
+                    return db
+                end
+                -- Do the string prefixes match? (e.g. 'FrogskisCursorTrail2' and 'FrogskisCursorTrailAccountDB')
+                local cleanK = k:lower():gsub("%d+$", "")
+                if cleanVar ~= "" and cleanK ~= "" and (cleanVar:find(cleanK, 1, true) or cleanK:find(cleanVar, 1, true)) then
+                    return db
+                end
+            end
+        end
     end
 
     return nil
@@ -134,7 +155,12 @@ local function IdentifyAddonStructure(varName)
     if not mainDB or type(mainDB) ~= "table" then return nil end
 
     local db = GetAceDBForVariable(varName)
-    if db then return TYPE_ACE3, db end
+    if db then 
+        -- Safety bind: Ensure custom DB manager actually manages this specific table
+        if db.sv == mainDB or mainDB.profiles or mainDB.Profiles or mainDB.PROFILES then
+            return TYPE_ACE3, db 
+        end
+    end
 
     local suffixes = {
         "_CONFIG", "_DATA", "_DB", "_SETTINGS", "_VARS", "_OPTIONS", "_CHAR",
@@ -344,6 +370,20 @@ local function forceDetectVariables()
     for varName, _ in pairs(detected) do table.insert(RefluxDB.emulated, varName) end
 end
 
+local function RefreshAceProfiles()
+    if InCombatLockdown() or not LibStub then return end
+    local AceDB = LibStub("AceDB-3.0", true)
+    if not AceDB or not AceDB.db_registry then return end
+    for db, _ in pairs(AceDB.db_registry) do
+        if type(db) == "table" and db.callbacks and db.callbacks.Fire then
+            local currentProfile = (db.GetCurrentProfile and db:GetCurrentProfile()) or "Default"
+            local isBlizzardDB = false
+            if db.parent and (db.parent.GetObjectType or issecurevariable(db, "parent")) then isBlizzardDB = true end
+            if not isBlizzardDB then pcall(db.callbacks.Fire, db.callbacks, "OnProfileChanged", db, currentProfile) end
+        end
+    end
+end
+
 local function ValidateAddons(profileName)
     if not RefluxDB.profiles[profileName] or not RefluxDB.profiles[profileName].meta or not RefluxDB.profiles[profileName].meta.addons then return {} end
     
@@ -352,6 +392,18 @@ local function ValidateAddons(profileName)
     local GetNum = (C_AddOns and C_AddOns.GetNumAddOns) or GetNumAddOns
     local GetInfo = (C_AddOns and C_AddOns.GetAddOnInfo) or GetAddOnInfo
     local GetDependencies = (C_AddOns and C_AddOns.GetAddOnDependencies) or GetAddOnDependencies
+    local playerName = UnitName("player")
+
+    local function IsAddOnEnabled(name)
+        if C_AddOns and C_AddOns.GetAddOnEnableState then
+            return C_AddOns.GetAddOnEnableState(name, playerName) > 0
+        elseif GetAddOnEnableState then
+            return GetAddOnEnableState(playerName, name) > 0
+        else
+            local _, _, _, _, reason = GetInfo(name)
+            return reason ~= "DISABLED"
+        end
+    end
     
     local expectedEnabled = {}
     local function MarkExpected(name)
@@ -367,11 +419,16 @@ local function ValidateAddons(profileName)
     for name, state in pairs(savedAddons) do if state and GetInfo(name) then MarkExpected(name) end end
     
     for i = 1, GetNum() do
-        local name, _, _, isEnabled = GetInfo(i)
-        if name ~= "Reflux" and name ~= "Reflux Enhanced" then
+        local name = GetInfo(i)
+        if name and name ~= "Reflux" and name ~= "Reflux Enhanced" then
+            local isEnabled = IsAddOnEnabled(name)
             local shouldBeEnabled = expectedEnabled[name]
-            if isEnabled and not shouldBeEnabled then table.insert(missing, name .. " (Should be Disabled)")
-            elseif not isEnabled and shouldBeEnabled then table.insert(missing, name .. " (Should be Enabled)") end
+
+            if isEnabled and not shouldBeEnabled then 
+                table.insert(missing, name .. " (Should be Disabled)")
+            elseif not isEnabled and shouldBeEnabled then 
+                table.insert(missing, name .. " (Should be Enabled)") 
+            end
         end
     end
     return missing
@@ -396,9 +453,20 @@ local function SyncAddonsOnly(profileName)
     
     print("|cFF00FF00Reflux Enhanced: Syncing addons for '"..profileName.."'...|r")
     
+    local function IsAddOnEnabled(name)
+        if C_AddOns and C_AddOns.GetAddOnEnableState then
+            return C_AddOns.GetAddOnEnableState(name, playerName) > 0
+        elseif GetAddOnEnableState then
+            return GetAddOnEnableState(playerName, name) > 0
+        else
+            local _, _, _, _, reason = GetInfo(name)
+            return reason ~= "DISABLED"
+        end
+    end
+    
     local function EnableWithDeps(addonName)
-        local _, _, _, isEnabled = GetInfo(addonName)
-        if not isEnabled then
+        if not IsAddOnEnabled(addonName) then
+            Enable(addonName) 
             Enable(addonName, playerName)
             print("  |cFF00FF00+ Enabling: " .. addonName .. "|r")
             changesMade = true
@@ -406,9 +474,9 @@ local function SyncAddonsOnly(profileName)
         if GetDependencies then
             local deps = {GetDependencies(addonName)}
             for _, depName in ipairs(deps) do
-                if depName and depName ~= "" then
-                    local _, _, _, depEnabled = GetInfo(depName)
-                    if not depEnabled then
+                if depName and depName ~= "" and GetInfo(depName) then
+                    if not IsAddOnEnabled(depName) then
+                        Enable(depName) 
                         Enable(depName, playerName)
                         print("  |cFF88FF88  + Auto-Enabling Dependency: " .. depName .. "|r")
                         changesMade = true
@@ -419,9 +487,10 @@ local function SyncAddonsOnly(profileName)
     end
 
     for i = 1, GetNum() do
-        local name, _, _, isEnabled = GetInfo(i)
-        if name ~= "Reflux" and name ~= "Reflux Enhanced" then
-            if isEnabled and not savedAddons[name] then
+        local name = GetInfo(i)
+        if name and name ~= "Reflux" and name ~= "Reflux Enhanced" then
+            if IsAddOnEnabled(name) and not savedAddons[name] then
+                Disable(name) 
                 Disable(name, playerName)
                 print("  |cFFFF0000- Disabling: " .. name .. "|r")
                 changesMade = true
@@ -443,6 +512,7 @@ local function SyncAddonsOnly(profileName)
         ReloadUI()
     else
         print("|cFFFFFF00Reflux Enhanced: Addons are already correct for this profile.|r")
+        print("|cFFFFFF00You can now safely run: |r|cFF00FF00/reflux switch " .. profileName .. "|r")
     end
 end
 
@@ -456,16 +526,22 @@ local function saveProfile(profileName)
     for _, varName in ipairs(RefluxDB.emulated) do
         local vType, extra = IdentifyAddonStructure(varName)
         
-        -- Hooking directly into native Ace3 APIs
         if vType == "ACE3" then
             local db = extra
-            if db.GetCurrentProfile and db.SetProfile and db.CopyProfile then
+            if db.GetCurrentProfile and db.SetProfile then
                 local currentProfile = db:GetCurrentProfile()
                 if currentProfile ~= profileName then
-                    -- pcall prevents malformed addons from breaking the loop
                     pcall(function()
-                        db:SetProfile(profileName)
-                        db:CopyProfile(currentProfile)
+                        if db.CopyProfile then
+                            db:SetProfile(profileName)
+                            db:CopyProfile(currentProfile)
+                        else
+                            -- Fallback to support Frogski's specific CreateProfile signature
+                            if type(db.CreateProfile) == "function" then
+                                pcall(db.CreateProfile, db, profileName, true)
+                            end
+                            db:SetProfile(profileName)
+                        end
                     end)
                 end
             end
@@ -492,10 +568,26 @@ local function saveProfile(profileName)
     local activeAddons = {}
     local GetNum = (C_AddOns and C_AddOns.GetNumAddOns) or GetNumAddOns
     local GetInfo = (C_AddOns and C_AddOns.GetAddOnInfo) or GetAddOnInfo
+    local playerName = UnitName("player")
     
+    local function IsAddOnEnabled(name)
+        if C_AddOns and C_AddOns.GetAddOnEnableState then
+            return C_AddOns.GetAddOnEnableState(name, playerName) > 0
+        elseif GetAddOnEnableState then
+            return GetAddOnEnableState(playerName, name) > 0
+        else
+            local _, _, _, _, reason = GetInfo(name)
+            return reason ~= "DISABLED"
+        end
+    end
+
     for i = 1, GetNum() do
-        local name, _, _, enabled = GetInfo(i)
-        if enabled then activeAddons[name] = true end
+        local name = GetInfo(i)
+        if name then
+            if IsAddOnEnabled(name) then 
+                activeAddons[name] = true 
+            end
+        end
     end
     
     RefluxDB.profiles[profileName].meta = { timestamp = time(), addons = activeAddons }
@@ -533,8 +625,6 @@ local function switchProfile(profileName)
     
     for _, varName in ipairs(RefluxDB.emulated) do
         local vType, extra = IdentifyAddonStructure(varName)
-        
-        -- Utilizing native Ace3 SetProfile 
         if vType == "ACE3" then
             local db = extra
             if db.SetProfile then
@@ -551,6 +641,7 @@ local function switchProfile(profileName)
     local charKey = UnitName("player") .. " - " .. GetRealmName()
     RefluxDB.characterLinks[charKey] = profileName
     
+    RefreshAceProfiles()
     collectgarbage("collect")
     
     print("|cFF00FF00Reflux Enhanced: Switched to '" .. profileName .. "'. Reloading UI...|r")
@@ -708,11 +799,16 @@ f:SetScript("OnEvent", function()
         local pName = RefluxDB.forceNextLogin
         RefluxDB.forceNextLogin = nil
         C_Timer.After(1, function() print("|cFF00FF00Reflux Enhanced: '" .. pName .. "' active.|r") end)
+    elseif RefluxDB.pendingSyncProfile then
+        local pName = RefluxDB.pendingSyncProfile
+        RefluxDB.pendingSyncProfile = nil
+        C_Timer.After(2, function()
+            print("|cFFFFFF00Reflux Enhanced: Addon sync complete!|r")
+            print("|cFFFFFF00Action Required: Type |r|cFF00FF00/reflux switch " .. pName .. "|r|cFFFFFF00 to apply the profile data.|r")
+        end)
     elseif assignedProfile then
         C_Timer.After(1.5, function()
             SilentAutoRestore(assignedProfile)
         end)
     end
 end)
-
-print("|cFF00FF00Reflux Enhanced loaded.|r")
