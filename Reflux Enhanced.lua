@@ -183,17 +183,23 @@ local function IdentifyAddonStructure(varName)
         end
     end
 
-    local suffixes = {
-        "_CONFIG", "_DATA", "_DB", "_SETTINGS", "_VARS", "_OPTIONS", "_CHAR",
-        "CONFIG", "DATA", "DB", "SETTINGS", "VARS", "OPTIONS"
-    }
     local baseName = nil
     local varLower = varName:lower()
     
-    for _, suffix in ipairs(suffixes) do
-        if varLower:find(suffix:lower() .. "$") then
-            baseName = varName:sub(1, #varName - #suffix)
-            break
+    local vStart = varLower:find("_db_v%d+$") or varLower:find("db_v%d+$")
+    
+    if vStart then
+        baseName = varName:sub(1, vStart - 1)
+    else
+        local suffixes = {
+            "_CONFIG", "_DATA", "_DB", "_SETTINGS", "_VARS", "_OPTIONS", "_CHAR",
+            "CONFIG", "DATA", "DB", "SETTINGS", "VARS", "OPTIONS"
+        }
+        for _, suffix in ipairs(suffixes) do
+            if varLower:find(suffix:lower() .. "$") then
+                baseName = varName:sub(1, #varName - #suffix)
+                break
+            end
         end
     end
 
@@ -381,7 +387,7 @@ local function forceDetectVariables()
     for k, v in pairs(_G) do
         if type(v) == "table" and k ~= "RefluxDB" and not detected[k] and not isBlacklisted(k) and not isUIObject(v) then
             local kLower = k:lower()
-            if kLower:find("db$") or kLower:find("data$") or kLower:find("config$") or kLower:find("settings$") or kLower:find("options$") or kLower:find("vars$") then 
+            if kLower:find("db$") or kLower:find("data$") or kLower:find("config$") or kLower:find("settings$") or kLower:find("options$") or kLower:find("vars$") or kLower:find("db_v%d+$") then 
                 detected[k] = true 
             end
         end
