@@ -1,0 +1,158 @@
+name: Release Build
+
+on:
+  push:
+    tags: [ '[0-9]+.[0-9]+.[0-9]+' ]
+  workflow_dispatch:
+    inputs:
+      createAddOnChangeLog:
+        description: 'Create Add-On Changelog'
+        required: false
+        default: false
+        type: boolean
+      createDraftRelease:
+        description: 'Create Github Release Draft'
+        required: true
+        default: true
+        type: boolean
+      uploadCurseForge:
+        description: 'Upload to CurseForge.com'
+        default: true
+        type: boolean
+
+env:
+  addonName: SpellOverlay-Enhanced
+  curseForgeProjectId: 1455915
+  uploadBuildArtifacts: true
+  artifact_retentionDays: 7
+  releaseDir: ./.release
+  refName: ${{ github.ref_name }}
+  repo: SpellOverlay-Enhanced
+  createAddOnChangeLog: true
+  createDraftRelease: true
+  uploadCurseForge: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      ## ------------------------------------------------ ##
+      - name: "Set Env Variable: GITHUB_SHA_SHORT"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = context.sha.substring(0, 7)
+            core.exportVariable('GITHUB_SHA_SHORT', sha)
+      ## ------------------------------------------------ ##
+      - name: "Set ENV for manual triggers (workflow_dispatch)"
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          echo createDraftRelease="${{ inputs.createDraftRelease }}" >> $GITHUB_ENV
+          echo uploadCurseForge="${{ inputs.uploadCurseForge }}" >> $GITHUB_ENV
+      ## ------------------------------------------------ ##
+      - name: "Set ENV Var Option to Skip Uploads on Branch Builds and refName"
+        if: ${{ github.ref_type == 'branch' }}
+        run: |
+          echo packagerOptions="-d" >> $GITHUB_ENV
+          echo refName="${GITHUB_SHA_SHORT}" >> $GITHUB_ENV
+      ## ------------------------------------------------ ##
+      - name: "Set ENV Variable: buildBasePath & buildArtifactFilename"
+        run: |
+          echo buildBasePath="${releaseDir}/${addonName}" >> $GITHUB_ENV
+          echo buildArtifactFilename="SpellOverlay_Enhanced-${refName}.zip" >> $GITHUB_ENV
+      ## ------------------------------------------------ ##
+      - name: "Set ENV Variable: buildArtifact"
+        run: |
+          echo buildArtifact="${releaseDir}/${buildArtifactFilename}" >> $GITHUB_ENV
+      ## ------------------------------------------------ ##
+      - name: "Set ENV Variable: Upload to CurseForge"
+        if: ${{ env.uploadCurseForge != 'false' }}
+        run: |
+          echo uploadCurseForge="${uploadCurseForge}"
+          echo bigWigsUploads="${bigWigsUploads} -p ${curseForgeProjectId}" >> $GITHUB_ENV
+          echo CF_API_KEY="${{ secrets.CF_API_KEY }}" >> $GITHUB_ENV
+      ## ------------------------------------------------ ##
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      ## ------------------------------------------------ ##
+      - name: "Create AddOn Changelog"
+        if: ${{ env.createAddOnChangeLog != 'false' }}
+        id: build_changelog
+        uses: mikepenz/release-changelog-builder-action@v5
+        with:
+          fetchViaCommits: true
+          configuration: ".github/release-changelog-builder-action.json"
+      ## ------------------------------------------------ ##
+      - name: "Create AddOn CHANGELOG.txt"
+        run: |
+          export c_ADDON_NAME="${{ env.addonName }}"
+          export c_REPOSITORY="${{ env.repo }}"
+          export c_RESOLVED_VERSION="${{ env.refName }}"
+          c_changeLog="$(envsubst < ${GITHUB_WORKSPACE}/.github/changelog-custom.md)"
+          CHANGELOG_FILE="${GITHUB_WORKSPACE}/CHANGELOG.txt"
+          
+          TAG_MESSAGE=$(git tag -l --format='%(contents)' ${{ env.refName }})
+          
+          cat <<EOF > "$CHANGELOG_FILE"
+          ${c_changeLog}
+          EOF
+          
+          echo "" >> "$CHANGELOG_FILE"
+          echo "### Release Notes" >> "$CHANGELOG_FILE"
+          echo "$TAG_MESSAGE" >> "$CHANGELOG_FILE"
+          echo "" >> "$CHANGELOG_FILE"
+          
+          cat <<'EOF' >> "$CHANGELOG_FILE"
+          ${{ steps.build_changelog.outputs.changelog }}
+          EOF
+      ## ------------------------------------------------ ##
+      - uses: BigWigsMods/packager@v2
+        with:
+          args: -r ${releaseDir} ${bigWigsUploads} ${packagerOptions}
+      ## ------------------------------------------------ ##
+      - name: "Verify Build Artifact Exists: ${{ env.buildArtifact }}"
+        uses: andstor/file-existence-action@v3
+        with:
+          files: "${{ env.buildArtifact }}"
+          fail: true
+      ## ------------------------------------------------ ##
+      - name: Check Vars
+        run: |
+          echo "buildArtifactChecksum=$(sha256sum $buildArtifact | cut -d' ' -f1)" >> $GITHUB_ENV
+          echo "buildArtifact is $buildArtifact"
+      ## ------------------------------------------------ ##
+      - name: Upload Build Artifact File
+        if: ${{ env.uploadBuildArtifacts == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.buildArtifactFilename }}
+          path: ${{ env.buildArtifact }}
+          retention-days: ${{ env.artifact_retentionDays }}
+      ## ------------------------------------------------ ##
+      - name: Append SHA to Changelog
+        if: ${{ env.createDraftRelease != 'false' }}
+        run: |
+          echo "<br><br>" >> CHANGELOG.txt
+          echo "#### ${{ env.buildArtifactFilename }}" >> CHANGELOG.txt
+          echo "\`\`\`text" >> CHANGELOG.txt
+          echo "sha256:${{ env.buildArtifactChecksum }}" >> CHANGELOG.txt
+          echo "\`\`\`" >> CHANGELOG.txt
+      ## ------------------------------------------------ ##
+      - name: Publish Release
+        if: ${{ env.createDraftRelease != 'false' }}
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          name: ${{ env.refName }}
+          tag_name: ${{ env.refName }}
+          body_path: CHANGELOG.txt
+          draft: false
+          prerelease: false
+          files: ${{ env.buildArtifact }}
