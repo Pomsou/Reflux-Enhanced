@@ -1,5 +1,19 @@
 -- Reflux Enhanced - Profile Manager
--- Version: 1.0.9 (Custom DB Manager Support, fixed Reflux Addons command)
+-- Version: 1.1.0 (Reflux API for custom DB addons)
+
+-- =============================================================
+-- PUBLIC API REGISTRY
+-- =============================================================
+_G.RefluxEnhancedAPI = _G.RefluxEnhancedAPI or {}
+_G.RefluxEnhancedAPI.CustomHandlers = {}
+_G.RefluxEnhancedAPI.IgnoredDBs = {}
+
+function _G.RefluxEnhancedAPI:RegisterCustomAddon(mainDBName, handlerParams, ignoredDBsList)
+    self.CustomHandlers[mainDBName] = handlerParams
+    if ignoredDBsList and type(ignoredDBsList) == "table" then
+        for _, dbName in ipairs(ignoredDBsList) do self.IgnoredDBs[dbName] = true end
+    end
+end
 
 -- =============================================================
 -- LIBRARIES & VARIABLES
@@ -151,6 +165,13 @@ local TYPE_SPLIT = "SPLIT"
 local TYPE_FLAT = "FLAT"
 
 local function IdentifyAddonStructure(varName)
+    -- 1. Check Custom API Hooks First
+    if _G.RefluxEnhancedAPI and _G.RefluxEnhancedAPI.IgnoredDBs[varName] then return "IGNORED", nil end
+    if _G.RefluxEnhancedAPI and _G.RefluxEnhancedAPI.CustomHandlers[varName] then
+        local handler = _G.RefluxEnhancedAPI.CustomHandlers[varName]
+        if handler.api() then return "CUSTOM", handler end
+    end
+
     local mainDB = _G[varName]
     if not mainDB or type(mainDB) ~= "table" then return nil end
 
@@ -365,6 +386,12 @@ local function forceDetectVariables()
             end
         end
     end
+-- FORCE INCLUDE CUSTOM API ADDONS (Bypasses the scanner)
+    if _G.RefluxEnhancedAPI and _G.RefluxEnhancedAPI.CustomHandlers then
+        for customVar, _ in pairs(_G.RefluxEnhancedAPI.CustomHandlers) do
+            detected[customVar] = true
+        end
+    end
 
     RefluxDB.emulated = {}
     for varName, _ in pairs(detected) do table.insert(RefluxDB.emulated, varName) end
@@ -526,7 +553,13 @@ local function saveProfile(profileName)
     for _, varName in ipairs(RefluxDB.emulated) do
         local vType, extra = IdentifyAddonStructure(varName)
         
-        if vType == "ACE3" then
+        if vType == "CUSTOM" then
+            local handler = extra
+            local currentProfile = handler.get()
+            if currentProfile ~= profileName then
+                pcall(function() handler.copy(profileName) end)
+            end
+        elseif vType == "ACE3" then
             local db = extra
             if db.GetCurrentProfile and db.SetProfile then
                 local currentProfile = db:GetCurrentProfile()
@@ -536,7 +569,6 @@ local function saveProfile(profileName)
                             db:SetProfile(profileName)
                             db:CopyProfile(currentProfile)
                         else
-                            -- Fallback to support Frogski's specific CreateProfile signature
                             if type(db.CreateProfile) == "function" then
                                 pcall(db.CreateProfile, db, profileName, true)
                             end
@@ -545,7 +577,7 @@ local function saveProfile(profileName)
                     end)
                 end
             end
-        elseif vType then
+        elseif vType ~= "IGNORED" and vType then
             local data = CaptureActiveData(varName, vType, extra)
             CreateAndPopulate(varName, profileName, data, vType, extra)
             SwitchPointers(varName, profileName, vType, extra)
@@ -625,12 +657,15 @@ local function switchProfile(profileName)
     
     for _, varName in ipairs(RefluxDB.emulated) do
         local vType, extra = IdentifyAddonStructure(varName)
-        if vType == "ACE3" then
+        if vType == "CUSTOM" then
+            local handler = extra
+            pcall(function() handler.set(profileName) end)
+        elseif vType == "ACE3" then
             local db = extra
             if db.SetProfile then
                 pcall(function() db:SetProfile(profileName) end)
             end
-        elseif vType then 
+        elseif vType ~= "IGNORED" and vType then 
             SwitchPointers(varName, profileName, vType, extra) 
         end
     end
@@ -733,7 +768,10 @@ function refluxCommandHandler(msg)
             if vType == "ACE3" then typeColor = "|cFFFFaa00"
             elseif vType == "INTERNAL" then typeColor = "|cFF00FF00"
             elseif vType == "SPLIT" then typeColor = "|cFF00aaff"
-            elseif vType == "FLAT" then typeColor = "|cFFFF00FF" end
+            elseif vType == "FLAT" then typeColor = "|cFFFF00FF"
+            elseif vType == "CUSTOM" then typeColor = "|cFFff55ff"
+            elseif vType == "IGNORED" then typeColor = "|cFF555555" end
+
             if vType then print("  " .. typeColor .. "[" .. vType .. "]|r |cFFFFFF00" .. varName .. "|r") else print("  |cFFFF0000[UNKNOWN]|r |cFFFFFF00" .. varName .. "|r") end
             count = count + 1
         end
