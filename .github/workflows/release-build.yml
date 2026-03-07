@@ -2,7 +2,7 @@ name: Release Build
 
 on:
   push:
-    tags: [ '[0-9]+.[0-9]+.[0-9]+' ]
+    tags: [ '[0-9]+.[0-9]+.[0-9]+*' ]
   workflow_dispatch:
     inputs:
       createAddOnChangeLog:
@@ -21,13 +21,13 @@ on:
         type: boolean
 
 env:
-  addonName: SpellOverlay-Enhanced
-  curseForgeProjectId: 1455915
+  addonName: Reflux-Enhanced
+  curseForgeProjectId: 1447030
   uploadBuildArtifacts: true
   artifact_retentionDays: 7
   releaseDir: ./.release
   refName: ${{ github.ref_name }}
-  repo: SpellOverlay-Enhanced
+  repo: Reflux-Enhanced
   createAddOnChangeLog: true
   createDraftRelease: true
   uploadCurseForge: true
@@ -63,7 +63,7 @@ jobs:
       - name: "Set ENV Variable: buildBasePath & buildArtifactFilename"
         run: |
           echo buildBasePath="${releaseDir}/${addonName}" >> $GITHUB_ENV
-          echo buildArtifactFilename="SpellOverlay_Enhanced-${refName}.zip" >> $GITHUB_ENV
+          echo buildArtifactFilename="Reflux-Enhanced-${refName}.zip" >> $GITHUB_ENV
       ## ------------------------------------------------ ##
       - name: "Set ENV Variable: buildArtifact"
         run: |
