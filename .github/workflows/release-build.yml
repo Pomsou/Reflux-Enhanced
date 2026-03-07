@@ -63,7 +63,7 @@ jobs:
       - name: "Set ENV Variable: buildBasePath & buildArtifactFilename"
         run: |
           echo buildBasePath="${releaseDir}/${addonName}" >> $GITHUB_ENV
-          echo buildArtifactFilename="Reflux-Enhanced-${refName}.zip" >> $GITHUB_ENV
+          echo buildArtifactFilename="Reflux_Enhanced-${refName}.zip" >> $GITHUB_ENV
       ## ------------------------------------------------ ##
       - name: "Set ENV Variable: buildArtifact"
         run: |
