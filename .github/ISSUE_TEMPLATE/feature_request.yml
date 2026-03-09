@@ -19,7 +19,7 @@ body:
     id: problem_context
     attributes:
       label: Is your feature request related to a problem?
-      description: Sometimes the best features are the ones that solves an issue. (e.g., "I'm always frustrated when..." or "During a Midnight raid, it's hard to track...")
+      description: Sometimes the best features solve an annoyance. (e.g., "I'm always frustrated when..." or "During a Midnight raid, it's hard to track...")
       placeholder: "When I am in combat, I cannot..."
     validations:
       required: false
@@ -29,10 +29,10 @@ body:
       label: Gameplay Context
       description: Where would this feature be most useful? (Check all that apply)
       options:
-        - Raiding / Mythic+ (PvE)
-        - Arena / Battlegrounds (PvP)
-        - General UI / Leveling
-        - Addon Configuration Panel
+        - label: Raiding / Mythic+ (PvE)
+        - label: Arena / Battlegrounds (PvP)
+        - label: General UI / Leveling
+        - label: Addon Configuration Panel
   - type: textarea
     id: alternatives
     attributes:
