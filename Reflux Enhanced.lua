@@ -166,10 +166,23 @@ local TYPE_FLAT = "FLAT"
 
 local function IdentifyAddonStructure(varName)
     -- 1. Check Custom API Hooks First
-    if _G.RefluxEnhancedAPI and _G.RefluxEnhancedAPI.IgnoredDBs[varName] then return "IGNORED", nil end
-    if _G.RefluxEnhancedAPI and _G.RefluxEnhancedAPI.CustomHandlers[varName] then
-        local handler = _G.RefluxEnhancedAPI.CustomHandlers[varName]
-        if handler.api() then return "CUSTOM", handler end
+    if _G.RefluxEnhancedAPI then
+        local function getBaseDB(n) return type(n) == "string" and n:lower():gsub("_?v%d+$", "") or "" end
+        local baseVarName = getBaseDB(varName)
+        
+        if _G.RefluxEnhancedAPI.IgnoredDBs then
+            for ignoredDB, _ in pairs(_G.RefluxEnhancedAPI.IgnoredDBs) do
+                if getBaseDB(ignoredDB) == baseVarName then return "IGNORED", nil end
+            end
+        end
+        
+        if _G.RefluxEnhancedAPI.CustomHandlers then
+            for customDB, handler in pairs(_G.RefluxEnhancedAPI.CustomHandlers) do
+                if getBaseDB(customDB) == baseVarName then
+                    if handler.api() then return "CUSTOM", handler end
+                end
+            end
+        end
     end
 
     local mainDB = _G[varName]
@@ -395,7 +408,19 @@ local function forceDetectVariables()
 -- FORCE INCLUDE CUSTOM API ADDONS (Bypasses the scanner)
     if _G.RefluxEnhancedAPI and _G.RefluxEnhancedAPI.CustomHandlers then
         for customVar, _ in pairs(_G.RefluxEnhancedAPI.CustomHandlers) do
-            detected[customVar] = true
+            local baseCustom = customVar:lower():gsub("_?v%d+$", "")
+            local alreadyFound = false
+
+            for detectedVar, _ in pairs(detected) do
+                if detectedVar:lower():gsub("_?v%d+$", "") == baseCustom then
+                    alreadyFound = true
+                    break
+                end
+            end
+            
+            if not alreadyFound then
+                detected[customVar] = true
+            end
         end
     end
 
