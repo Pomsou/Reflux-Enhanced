@@ -27,7 +27,7 @@ _G.RefluxEnhancedAPI:RegisterCustomAddon(
             end
         end
     },
-    {"OpulentCastingBarsCharDB"} -- Ignored DBs
+    {"OpulentCastingBarsCharDB"} -- Ignored
 )
 
 -- 2. Frogski's Cursor Trail
@@ -46,17 +46,40 @@ _G.RefluxEnhancedAPI:RegisterCustomAddon(
             _G.FrogskisCursorTrail2.db:SetProfileAccountWide(name, true)
         end
     },
-    {"FrogskisCursorTrailAccountDB"} -- Ignored DBs
+    {"FrogskisCursorTrailAccountDB"} -- Ignored
 )
 
--- 3. BasicMinimap
+-- 4. DandersFrames
+_G.RefluxEnhancedAPI:RegisterCustomAddon(
+    "DandersFramesDB",
+    {
+        api = function() return _G.DandersFrames end,
+        get = function() return _G.DandersFrames:GetCurrentProfile() end,
+        set = function(name)
+            _G.DandersFrames:SetProfile(name)
+        end,
+        copy = function(name)
+            local DF = _G.DandersFrames
+            local current = DF:GetCurrentProfile()
+            
+            if current == name then return end 
+
+            if DF.DeleteProfile then DF:DeleteProfile(name) end
+            
+            DF:DuplicateProfile(name)
+        end
+    },
+    {"DandersFramesCharDB", "DandersFramesClickCastingDB"}
+)
+
+-- 4. BasicMinimap
 _G.RefluxEnhancedAPI:RegisterCustomAddon(
     "BasicMinimapSV",
     {
         api = function() return _G.BasicMinimap and _G.BasicMinimap.db end,
         get = function() return _G.BasicMinimap.db:GetCurrentProfile() end,
         set = function(name) 
-            -- Swallow the buggy callback error on switch
+
             pcall(function() _G.BasicMinimap.db:SetProfile(name) end) 
         end,
         copy = function(name)
@@ -64,9 +87,7 @@ _G.RefluxEnhancedAPI:RegisterCustomAddon(
             local current = db:GetCurrentProfile()
             
             if current == name then return end 
-            
-            -- Isolate the commands. If SetProfile crashes due to the author's bug, 
-            -- the pcall absorbs it and forces the code to proceed to CopyProfile anyway.
+
             pcall(function() db:SetProfile(name) end)
             pcall(function() 
                 if db.CopyProfile then db:CopyProfile(current) end 
