@@ -854,30 +854,55 @@ end
 
 local f = CreateFrame("Frame")
 f:RegisterEvent("PLAYER_LOGIN")
-f:SetScript("OnEvent", function()
-    initDB()
-    
-    if LDBIcon and not LDBIcon:IsRegistered("RefluxEnhanced") then
-        LDBIcon:Register("RefluxEnhanced", refluxLDB, RefluxDB.minimap)
+f:RegisterEvent("PLAYER_LOGOUT") -- using player logout for saving on FLAT db
+
+f:SetScript("OnEvent", function(self, event)
+    -- =========================================================
+    -- LOGOUT: Auto-save FLAT databases so changes are updated after changes
+    -- =========================================================
+    if event == "PLAYER_LOGOUT" then
+        if RefluxDB and RefluxDB.activeProfile and RefluxDB.profiles[RefluxDB.activeProfile] then
+            for _, varName in ipairs(RefluxDB.emulated) do
+                local vType, _ = IdentifyAddonStructure(varName)
+                if vType == "FLAT" and _G[varName] then
+                    -- Update the snapshot with the live session data
+                    RefluxDB.profiles[RefluxDB.activeProfile][varName] = DeepCopy(_G[varName])
+                end
+            end
+        end
+        return
     end
-    
-    local charKey = UnitName("player") .. " - " .. GetRealmName()
-    local assignedProfile = RefluxDB.characterLinks[charKey]
-    
-    if RefluxDB.forceNextLogin then
-        local pName = RefluxDB.forceNextLogin
-        RefluxDB.forceNextLogin = nil
-        C_Timer.After(1, function() print("|cFF00FF00Reflux Enhanced: '" .. pName .. "' active.|r") end)
-    elseif RefluxDB.pendingSyncProfile then
-        local pName = RefluxDB.pendingSyncProfile
-        RefluxDB.pendingSyncProfile = nil
-        C_Timer.After(2, function()
-            print("|cFFFFFF00Reflux Enhanced: Addon sync complete!|r")
-            print("|cFFFFFF00Action Required: Type |r|cFF00FF00/reflux switch " .. pName .. "|r|cFFFFFF00 to apply the profile data.|r")
-        end)
-    elseif assignedProfile then
-        C_Timer.After(1.5, function()
-            SilentAutoRestore(assignedProfile)
-        end)
+
+    -- =========================================================
+    -- LOGIN: Standard Initialization
+    -- =========================================================
+    if event == "PLAYER_LOGIN" then
+        initDB()
+        
+        if LDBIcon and not LDBIcon:IsRegistered("RefluxEnhanced") then
+            LDBIcon:Register("RefluxEnhanced", refluxLDB, RefluxDB.minimap)
+        end
+        
+        local charKey = UnitName("player") .. " - " .. GetRealmName()
+        local assignedProfile = RefluxDB.characterLinks[charKey]
+        
+        if RefluxDB.forceNextLogin then
+            local pName = RefluxDB.forceNextLogin
+            RefluxDB.forceNextLogin = nil
+            RefluxDB.activeProfile = pName -- Ensure active profile is tracked
+            C_Timer.After(1, function() print("|cFF00FF00Reflux Enhanced: '" .. pName .. "' active.|r") end)
+        elseif RefluxDB.pendingSyncProfile then
+            local pName = RefluxDB.pendingSyncProfile
+            RefluxDB.pendingSyncProfile = nil
+            C_Timer.After(2, function()
+                print("|cFFFFFF00Reflux Enhanced: Addon sync complete!|r")
+                print("|cFFFFFF00Action Required: Type |r|cFF00FF00/reflux switch " .. pName .. "|r|cFFFFFF00 to apply the profile data.|r")
+            end)
+        elseif assignedProfile then
+            RefluxDB.activeProfile = assignedProfile -- Ensure the correct profile is active
+            C_Timer.After(1.5, function()
+                SilentAutoRestore(assignedProfile)
+            end)
+        end
     end
 end)
